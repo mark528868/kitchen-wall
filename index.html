@@ -340,6 +340,7 @@
     .mnav button { width:2.6rem; height:2.2rem; margin:-.6rem 0 -.4rem; border-radius:.6rem; font-size:1.7rem; line-height:1; color:var(--ink-dim); }
     .mnav button:active { background:rgba(255,255,255,.12); }
   </style>
+<style id="sleepwake-css">#sleepOverlay{position:fixed;inset:0;background:#000;z-index:2147483647;opacity:0;pointer-events:none;transition:opacity .8s ease;touch-action:none}#sleepOverlay.on{opacity:1;pointer-events:auto;cursor:none}.sw-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}.sw-row input[type=time],.sw-row input[type=number]{font:inherit;padding:4px 6px;border-radius:8px;border:1px solid #8886}</style>
 </head>
 <body>
   <div class="bg" aria-hidden="true"><div id="bgA"></div><div id="bgB"></div></div>
@@ -442,9 +443,9 @@
             <button type="button" class="switch" id="nlSwitch" role="switch" aria-checked="false" aria-label="Reduced blue light"></button>
           </div>
           <button type="button" class="mode" id="bgMode"><span class="ml">Background photo</span><span class="ms" id="bgState">Default</span></button>
-          <button type="button" class="mode stub" data-stub="Sleep / wake"><span class="ml">Sleep / wake</span><span class="ms">Soon</span></button>
+          <button type="button" class="mode" id="sleepMode"><span class="ml">Sleep / wake</span><span class="ms" id="sleepState">On</span></button>
           <button type="button" class="mode stub" data-stub="Art mode"><span class="ml">Art mode</span><span class="ms">Soon</span></button>
-          <button type="button" class="mode stub" data-stub="Touch to wake"><span class="ml">Touch to wake</span><span class="ms">Soon</span></button>
+          <button type="button" class="mode" id="touchMode"><span class="ml">Touch to wake</span><span class="ms" id="touchState">5 min</span></button>
           <button type="button" class="mode stub" data-stub="Grok Bot app" id="grokMode"><span class="ml">Open Grok Bot</span><span class="ms">Soon</span></button>
         </div>
       </section>
@@ -1127,6 +1128,67 @@
   setInterval(tick, 15000);
   // test hook (no data): lets a script advance the rolling album without waiting N minutes
   window.familyBoardDebug = { nextPhoto: bgNext };
+  // ── SLEEP / WAKE schedule (build marker: sleepwake-v1) ─────────
+  (function () {
+    var SW_KEY = "familyBoard.sleepWake.v1";
+    var DEF = { on: true, a1: "07:00", b1: "09:00", a2: "17:30", b2: "19:00", idleMin: 5, backlight: false };
+    var cfg = DEF; try { var raw = JSON.parse(localStorage.getItem(SW_KEY)); if (raw && typeof raw === "object") { cfg = {}; for (var k in DEF) cfg[k] = (k in raw) ? raw[k] : DEF[k]; } } catch (e) {}
+    var qs = new URLSearchParams(location.search), forceSleep = qs.get("sleep") === "1", sessOff = qs.get("sleep") === "0";
+    var simNow = /^\d{1,2}:\d{2}$/.test(qs.get("now") || "") ? qs.get("now") : null, simBase = Date.now();
+    var ov = document.getElementById("sleepOverlay"); if (!ov) { ov = document.createElement("div"); ov.id = "sleepOverlay"; ov.setAttribute("aria-hidden", "true"); ov.setAttribute("data-build", "sleepwake-v1"); document.body.appendChild(ov); }
+    var asleep = false, lastTouch = Date.now(), manual = false, wokeAt = 0;
+    function mins(t) { var p = String(t).split(":"); return (+p[0]) * 60 + (+p[1]); }
+    function nowMin() {
+      if (simNow) return (mins(simNow) + Math.floor((Date.now() - simBase) / 60000)) % 1440;
+      var d = new Date(); return d.getHours() * 60 + d.getMinutes();
+    }
+    function inWin(n, a, b) { a = mins(a); b = mins(b); return a <= b ? (n >= a && n < b) : (n >= a || n < b); }
+    function awakeWindow() { var n = nowMin(); return inWin(n, cfg.a1, cfg.b1) || inWin(n, cfg.a2, cfg.b2); }
+    function fully(fn) { try { if (cfg.backlight && window.fully) fn(window.fully); } catch (e) {} }
+    function setSleep(on) {
+      if (on === asleep) return; if (!on) wokeAt = Date.now(); asleep = on;
+      ov.classList.toggle("on", on); document.documentElement.setAttribute("data-asleep", on ? "1" : "0");
+      if (on) fully(function (f) { f.turnScreenOff(true); }); else fully(function (f) { f.turnScreenOn(); });
+    }
+    function idleMs() { return Math.max(1, +cfg.idleMin || 5) * 60000; }
+    function tick() {
+      if (forceSleep || (manual && asleep)) { setSleep(true); return; }
+      if (!cfg.on || sessOff || awakeWindow()) { setSleep(false); return; }
+      setSleep(Date.now() - lastTouch >= idleMs());
+    }
+    function wake() { forceSleep = false; manual = false; lastTouch = Date.now(); setSleep(false); }
+    ["pointerdown", "touchstart", "keydown"].forEach(function (t) { document.addEventListener(t, function () { lastTouch = Date.now(); if (asleep) wake(); }, { capture: true, passive: true }); });
+    function swallow(e) { if (e.cancelable) e.preventDefault(); e.stopPropagation(); }
+    ["pointerdown", "pointerup", "touchstart", "touchend", "mousedown", "mouseup", "click"].forEach(function (t) { ov.addEventListener(t, swallow, { passive: false }); });
+    // swallow the click the browser synthesises from the waking tap (overlay is already gone by then)
+    document.addEventListener("click", function (e) { if (Date.now() - wokeAt < 700) { e.preventDefault(); e.stopPropagation(); } }, true);
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
+    setInterval(tick, 30000);
+    function label() {
+      var s = document.getElementById("sleepState"), t = document.getElementById("touchState");
+      if (s) s.textContent = sessOff ? "Off (URL)" : (cfg.on ? "On" : "Off"); if (t) t.textContent = cfg.on ? (cfg.idleMin + " min") : "Off";
+    }
+    function openSheet() {
+      var h = '<p>Awake (never sleeps) in these windows. Other times the screen goes black; tap to wake, back to sleep after the timeout.</p>' +
+        '<div class="sw-row"><label><input type="checkbox" id="swOn"' + (cfg.on ? " checked" : "") + '> Schedule on</label></div>' +
+        '<div class="sw-row">Morning <input type="time" id="swA1" value="' + cfg.a1 + '"> – <input type="time" id="swB1" value="' + cfg.b1 + '"></div>' +
+        '<div class="sw-row">Evening <input type="time" id="swA2" value="' + cfg.a2 + '"> – <input type="time" id="swB2" value="' + cfg.b2 + '"></div>' +
+        '<div class="sw-row">Sleep after <input type="number" id="swIdle" min="1" max="120" value="' + cfg.idleMin + '"> min without touch</div>' +
+        '<div class="sw-row"><label><input type="checkbox" id="swBl"' + (cfg.backlight ? " checked" : "") + '> Backlight off when asleep (Fully Kiosk) — a tap may not wake it</label></div>';
+      sheet("Sleep / wake", h, '<div class="sw-row"><button type="button" class="stub-chip" id="swSave">Save</button><button type="button" class="stub-chip" id="swNow">Sleep now</button></div>');
+      document.getElementById("swSave").onclick = function () {
+        var g = function (i) { return document.getElementById(i); }, ok = /^\d{2}:\d{2}$/;
+        var n = { on: g("swOn").checked, a1: g("swA1").value, b1: g("swB1").value, a2: g("swA2").value, b2: g("swB2").value, idleMin: Math.min(120, Math.max(1, parseInt(g("swIdle").value, 10) || 5)), backlight: g("swBl").checked };
+        if (![n.a1, n.b1, n.a2, n.b2].every(function (v) { return ok.test(v); })) { ping("Check the times"); return; }
+        cfg = n; try { localStorage.setItem(SW_KEY, JSON.stringify(cfg)); } catch (e) { ping("Couldn’t save on this device"); }
+        label(); closeSheet(); lastTouch = Date.now(); tick(); ping("Sleep schedule saved");
+      };
+      document.getElementById("swNow").onclick = function () { closeSheet(); setTimeout(function () { manual = true; setSleep(true); }, 400); };
+    }
+    document.getElementById("sleepMode").onclick = openSheet; document.getElementById("touchMode").onclick = openSheet;
+    window.__sleepWake = { tick: tick, state: function () { return { asleep: asleep, cfg: cfg, now: nowMin() }; }, idle: function (ms) { lastTouch -= ms; tick(); } };
+    label(); tick();
+  })();
 })();
 </script>
 </body>
